@@ -1,5 +1,5 @@
 # Use Node.js 20 LTS
-FROM node:20-slim
+FROM node:22-slim
 
 # Install pnpm
 RUN npm install -g pnpm@10.26.2
