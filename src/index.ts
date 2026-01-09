@@ -1,7 +1,5 @@
 import express, { Request, Response, NextFunction } from "express";
 import { SessionsClient } from "@google-cloud/dialogflow-cx";
-import { google } from "googleapis";
-import nodemailer from "nodemailer";
 import {
     FB_ACCESS_TOKEN,
     FB_VERIFY_TOKEN,
@@ -10,10 +8,8 @@ import {
     CA_AGENT_ID,
     CA_PROJECT_ID,
     SERVICE_ACCOUNT_JSON,
-    GOOGLE_SHEET_ID,
     X_API_KEY,
-    GMAIL_ADDRESS,
-    GMAIL_PAASWORD
+    ZAPIER_WEBHOOK_URL
 } from "./config";
 
 const app = express();
@@ -21,22 +17,6 @@ const app = express();
 // Initialize Dialogflow CX Sessions Client
 const sessionsClient = new SessionsClient({
     credentials: SERVICE_ACCOUNT_JSON
-});
-
-// Initialize Google Sheets API
-const auth = new google.auth.GoogleAuth({
-    credentials: SERVICE_ACCOUNT_JSON,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-});
-const sheets = google.sheets({ version: "v4", auth });
-
-// Initialize Nodemailer transporter
-const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-        user: GMAIL_ADDRESS,
-        pass: GMAIL_PAASWORD,
-    },
 });
 
 // Middleware to parse JSON bodies
@@ -70,7 +50,7 @@ app.get("/", (req, res) => {
     res.send("Facebook Messenger Webhook Server");
 });
 
-// Playbook route - Save car information to Google Sheets
+// Playbook route - Send car information to Zapier webhook
 app.post("/playbook", apiKeyAuth, async (req: Request, res: Response) => {
     try {
         const { name, mobile, email, carMake, carModel, carVIN, carDamage, carMiles } = req.body;
@@ -83,35 +63,9 @@ app.post("/playbook", apiKeyAuth, async (req: Request, res: Response) => {
             });
         }
 
-        // Prepare data row with timestamp
+        // Prepare webhook payload
         const timestamp = new Date().toISOString();
-        const rowData = [
-            timestamp,
-            name,
-            mobile,
-            email,
-            carMake,
-            carModel,
-            carDamage,
-            carMiles,
-            carVIN
-        ];
-
-        // Append data to Google Sheet
-        await sheets.spreadsheets.values.append({
-            spreadsheetId: GOOGLE_SHEET_ID!,
-            range: "Sheet1!A:I", // Adjust sheet name and range as needed
-            valueInputOption: "USER_ENTERED",
-            requestBody: {
-                values: [rowData],
-            },
-        });
-
-        console.log("Data saved successfully to Google Sheets");
-
-        // Send email with the information
-        await sendCarInfoEmail({
-            timestamp,
+        const webhookPayload = {
             name,
             mobile,
             email,
@@ -119,62 +73,44 @@ app.post("/playbook", apiKeyAuth, async (req: Request, res: Response) => {
             carModel,
             carVIN,
             carDamage,
-            carMiles
+            carMiles,
+            timestamp
+        };
+
+        // Send data to Zapier webhook
+        if (!ZAPIER_WEBHOOK_URL) {
+            console.error("ZAPIER_WEBHOOK_URL is not configured");
+            return res.status(500).json({
+                message: "Webhook URL not configured"
+            });
+        }
+
+        const webhookResponse = await fetch(ZAPIER_WEBHOOK_URL, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(webhookPayload)
         });
 
+        if (!webhookResponse.ok) {
+            console.error("Zapier webhook error:", await webhookResponse.text());
+            return res.status(200).json({
+                message: "Failed to send data to webhook"
+            });
+        }
+
+        console.log("Data sent to Zapier webhook successfully");
         res.status(200).json({
-            message: "Data saved successfully"
+            message: "Data sent successfully"
         });
     } catch (error) {
-        console.error("Error saving to Google Sheets:", error);
+        console.error("Error sending to Zapier webhook:", error);
         res.status(200).json({
-            message: "Failed to save data"
+            message: "Failed to send data"
         });
     }
 });
-
-// Function to send car information email
-async function sendCarInfoEmail(data: {
-    timestamp: string;
-    name: string;
-    mobile: string;
-    email: string;
-    carMake: string;
-    carModel: string;
-    carVIN: string;
-    carDamage: string;
-    carMiles: string;
-}) {
-    try {
-        const mailOptions = {
-            from: GMAIL_ADDRESS,
-            to: GMAIL_ADDRESS, // Sending to the same Gmail address
-            subject: `New Car Information - ${data.name}`,
-            html: `
-                <h2>New Car Information Received</h2>
-                <p><strong>Timestamp:</strong> ${data.timestamp}</p>
-                <hr>
-                <h3>Customer Information</h3>
-                <p><strong>Name:</strong> ${data.name}</p>
-                <p><strong>Mobile:</strong> ${data.mobile}</p>
-                <p><strong>Email:</strong> ${data.email}</p>
-                <hr>
-                <h3>Car Details</h3>
-                <p><strong>Make:</strong> ${data.carMake}</p>
-                <p><strong>Model:</strong> ${data.carModel}</p>
-                <p><strong>VIN:</strong> ${data.carVIN}</p>
-                <p><strong>Mileage:</strong> ${data.carMiles} miles</p>
-                <p><strong>Damage Description:</strong> ${data.carDamage}</p>
-            `,
-        };
-
-        const info = await transporter.sendMail(mailOptions);
-        console.log("Email sent successfully:", info.messageId);
-    } catch (error) {
-        console.error("Error sending email:", error);
-        throw error;
-    }
-}
 
 // Webhook verification endpoint (GET)
 app.get("/webhook", (req: Request, res: Response) => {
